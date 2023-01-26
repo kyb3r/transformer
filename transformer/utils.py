@@ -18,10 +18,8 @@ idx_to_str = {i: s for s, i in str_to_idx.items()}
 def encode(text):
     return torch.tensor([str_to_idx[s] for s in text], dtype=torch.long)
 
-
 def decode(encoded):
     return "".join(idx_to_str[i] for i in encoded.tolist())
-
 
 def build_dataset(text, block_size):
     data = encode(text)

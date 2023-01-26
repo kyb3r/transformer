@@ -4,7 +4,7 @@ from torch import nn
 import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
-from utils import vocab_size
+from utils import get_dataloader, decode, vocab_size
 
 
 @dataclass
@@ -12,14 +12,14 @@ class Config:
     batch_size: int = 64
     num_layers: int = 6
     num_heads: int = 6
-    embedding_size: int = 384
+    embedding_size: int = 384 * 2
     hidden_size: int = 4 * embedding_size
     vocab_size: int = vocab_size
     block_size: int = 256
-    dropout: float = 0.2
+    dropout: float = 0.4
     device: str = "cuda"
     learning_rate: int = 1e-3
-    epochs: int = 40
+    epochs: int = 30
 
 
 class Head(nn.Module):
@@ -89,8 +89,15 @@ class Block(nn.Module):
         self.ln2 = nn.LayerNorm(config.embedding_size)
     
     def forward(self, x):
-        x = x + self.multi_headed_attention(self.ln1(x))
-        x = x + self.ffwd(self.ln2(x))
+        identity = x
+        x = self.ln1(x)
+        x = self.multi_headed_attention(x)
+        x = x + identity
+
+        identity = x
+        x = self.ln2(x)
+        x = self.ffwd(x)
+        x = x + identity
         return x
 
 class Transformer(nn.Module):
@@ -104,15 +111,20 @@ class Transformer(nn.Module):
             Block(config) 
             for _ in range(config.num_layers)
         ])
+        self.layer_norm = nn.LayerNorm(config.embedding_size)
         self.lm_head = nn.Linear(config.embedding_size, config.vocab_size)
 
     def forward(self, x):
         B, T = x.shape  # (batch_size, block_size)
 
         position_indexes = torch.arange(T, device=self.device)
-        x = self.pos_embeddings(position_indexes) + self.token_embeddings(x)
-        # x --> (batch_size, block_size, embedding_size)
+        pos_embeddings = self.pos_embeddings(position_indexes)
+        token_embeddings = self.token_embeddings(x) # NOTE: (B, T, C)
+
+        x = pos_embeddings + token_embeddings
         x = self.transformer_blocks(x)
+        x = self.layer_norm(x)
+
         logits = self.lm_head(x)
         return logits
 
@@ -124,43 +136,38 @@ class Transformer(nn.Module):
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.config.learning_rate)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, self.config.epochs)
-        return optimizer, scheduler
+        return optimizer
 
-    def generate(self, idx, max_new_tokens=100):
+    def generate(self, idx, max_new_tokens=1000, stream=False):
         block_size = self.config.block_size
         # idx is (B, T) array of indices in the current context
+        # Code from Andrej Karpathy
         for _ in range(max_new_tokens):
-            # crop idx to the last block_size tokens
             idx_cond = idx[:, -block_size:]
-            # get the predictions
             logits = self(idx_cond)
-            # focus only on the last time step
             logits = logits[:, -1, :]  # becomes (B, C)
-            # apply softmax to get probabilities
             probs = F.softmax(logits, dim=-1)  # (B, C)
-            # sample from the distribution
             idx_next = torch.multinomial(probs, num_samples=1)  # (B, 1)
-            # append sampled index to the running sequence
+            if stream:
+                yield idx_next
             idx = torch.cat((idx, idx_next), dim=1)  # (B, T+1)
         return idx
+    
+    def save_checkpoint(self, path):
+        torch.save(self.state_dict(), path)
     
     @property
     def num_parameters(self):
         return sum(p.numel() for p in self.parameters())
 
-
-if __name__ == "__main__":
-    from utils import get_dataloader, decode, vocab_size
-
+def train():
     config = Config()
     config.vocab_size = vocab_size
-
     train, validation = get_dataloader(config)
 
     model = Transformer(config).to(config.device)
-    print(f"Number of parameters: {model.num_parameters}")
-    optim, scheduler = model.configure_optimizers()
+    print(f"Number of parameters: {model.num_parameters/1e6:.2f}M")
+    optim = model.configure_optimizers()
 
     train_losses_all = []
     val_losses_all = []
@@ -178,7 +185,6 @@ if __name__ == "__main__":
                 optim.zero_grad()
                 loss.backward()
                 optim.step()
-                
 
                 losses.append(loss.item())
             print(f"Epoch - {epoch}: Loss: {np.mean(losses)}")
@@ -186,12 +192,14 @@ if __name__ == "__main__":
 
         val_losses = []
         with torch.no_grad():
+            model.eval()
             for x, y in validation:
                 x = x.to(config.device)
                 y = y.to(config.device)
                 logits = model(x)
                 loss = model.loss_function(logits, y)
                 val_losses.append(loss.item())
+            model.train()
 
         print(f"Epoch - {epoch}: Val Loss: {np.mean(val_losses)}")
         val_losses_all.append(np.mean(val_losses))
@@ -207,3 +215,10 @@ if __name__ == "__main__":
     starting_context = torch.zeros((1, 1), dtype=torch.long, device=config.device)
     tokens = model.generate(starting_context, max_new_tokens=1000)[0]
     print(decode(tokens))
+
+    model.save_checkpoint("model.pt")
+
+if __name__ == "__main__":
+    train()
+
+
