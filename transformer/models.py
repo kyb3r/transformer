@@ -10,16 +10,16 @@ from utils import get_dataloader, decode, vocab_size
 @dataclass
 class Config:
     batch_size: int = 64
-    num_layers: int = 6
+    num_layers: int = 10
     num_heads: int = 6
-    embedding_size: int = 384 * 2
+    embedding_size: int = 384 
     hidden_size: int = 4 * embedding_size
     vocab_size: int = vocab_size
     block_size: int = 256
     dropout: float = 0.4
     device: str = "cuda"
     learning_rate: int = 1e-3
-    epochs: int = 30
+    epochs: int = 35
 
 
 class Head(nn.Module):
@@ -210,11 +210,11 @@ def train():
     plt.plot(train_losses_all, label="train")
     plt.plot(val_losses_all, label="val")
     plt.legend()
-    plt.savefig("losses.png")
+    plt.savefig("results/losses.png")
 
-    starting_context = torch.zeros((1, 1), dtype=torch.long, device=config.device)
-    tokens = model.generate(starting_context, max_new_tokens=1000)[0]
-    print(decode(tokens))
+    # starting_context = torch.zeros((1, 1), dtype=torch.long, device=config.device)
+    # tokens = model.generate(starting_context, max_new_tokens=1000)[0]
+    # print(decode(tokens))
 
     model.save_checkpoint("model.pt")
 
