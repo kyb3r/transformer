@@ -36,7 +36,7 @@ class VisionConfig:
     dropout = 0.2
 
     device: str = "cuda"
-    learning_rate: int = 3e-4
+    learning_rate: int = 3e-3
     epochs: int = 35
 
 
@@ -130,7 +130,7 @@ if __name__ == "__main__":
     config = VisionConfig()
 
     model = VisionTransformer(config).to(config.device)
-    optim = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
+    optim = torch.optim.Adam(model.parameters(), lr=config.learning_rate, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optim, max_lr=config.learning_rate, steps_per_epoch=len(train_dl), epochs=config.epochs
     )
@@ -139,7 +139,7 @@ if __name__ == "__main__":
 
     from tqdm import tqdm
 
-    for epoch in range(config.epochs):
+    for epoch in range(config.epochs+5):
         losses = []
         for images, labels in tqdm(train_dl, desc=f"Epoch {epoch}"):
             images = images.to(config.device)

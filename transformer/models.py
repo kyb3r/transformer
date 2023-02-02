@@ -48,7 +48,7 @@ class Head(nn.Module):
         )  # B, block_size, block_size
         if use_mask:
             affinity = affinity.masked_fill(self.tril[:T, :T] == 0, float("-inf"))
-            
+
         affinity = torch.softmax(affinity, dim=-1)
         affinity = self.dropout(affinity)
 
