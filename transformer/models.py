@@ -10,9 +10,9 @@ from utils import get_dataloader, decode, vocab_size
 @dataclass
 class Config:
     batch_size: int = 64
-    num_layers: int = 10
+    num_layers: int = 6
     num_heads: int = 6
-    embedding_size: int = 384 
+    embedding_size: int = 384
     hidden_size: int = 4 * embedding_size
     vocab_size: int = vocab_size
     block_size: int = 256
@@ -20,6 +20,7 @@ class Config:
     device: str = "cuda"
     learning_rate: int = 1e-3
     epochs: int = 35
+    use_mask: bool = True
 
 
 class Head(nn.Module):
@@ -35,19 +36,24 @@ class Head(nn.Module):
         )
         self.dropout = nn.Dropout(config.dropout)
 
-    def forward(self, x):
+    def forward(self, x, use_mask=True):
         B, T, C = x.shape  # (batch_size, block_size, embedding_size)
 
-        key = self.key(x)
+        key = self.key(x)  # B, block_size, head_size
         query = self.query(x)
         value = self.value(x)
 
-        affinity = query @ key.transpose(-1, -2) / (C**0.5)
-        affinity = affinity.masked_fill(self.tril[:T, :T] == 0, float("-inf"))
+        affinity = (
+            query @ key.transpose(-1, -2) / (C**0.5)
+        )  # B, block_size, block_size
+        if use_mask:
+            affinity = affinity.masked_fill(self.tril[:T, :T] == 0, float("-inf"))
+            
         affinity = torch.softmax(affinity, dim=-1)
         affinity = self.dropout(affinity)
 
-        return affinity @ value
+        return affinity @ value  # B, block_size, head_size
+
 
 class MultiHeadedAttention(nn.Module):
     def __init__(self, config):
@@ -56,14 +62,15 @@ class MultiHeadedAttention(nn.Module):
         self.heads = nn.ModuleList([Head(config) for _ in range(config.num_heads)])
         self.project = nn.Linear(config.embedding_size, config.embedding_size)
         self.dropout = nn.Dropout(config.dropout)
-    
+
     def forward(self, x):
         B, T, C = x.shape
-        heads = [head(x) for head in self.heads]
+        heads = [head(x, self.config.use_mask) for head in self.heads]
         x = torch.cat(heads, dim=-1)
         x = self.project(x)
         x = self.dropout(x)
         return x
+
 
 class FeedForward(nn.Module):
     def __init__(self, config):
@@ -73,11 +80,13 @@ class FeedForward(nn.Module):
             nn.Linear(config.embedding_size, config.hidden_size),
             nn.ReLU(),
             nn.Linear(config.hidden_size, config.embedding_size),
-            nn.Dropout(config.dropout)
+            nn.ReLU(),
+            nn.Dropout(config.dropout),
         )
 
     def forward(self, x):
         return self.net(x)
+
 
 class Block(nn.Module):
     def __init__(self, config):
@@ -87,7 +96,7 @@ class Block(nn.Module):
         self.ffwd = FeedForward(config)
         self.ln1 = nn.LayerNorm(config.embedding_size)
         self.ln2 = nn.LayerNorm(config.embedding_size)
-    
+
     def forward(self, x):
         identity = x
         x = self.ln1(x)
@@ -100,6 +109,7 @@ class Block(nn.Module):
         x = x + identity
         return x
 
+
 class Transformer(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -107,26 +117,34 @@ class Transformer(nn.Module):
         self.device = config.device
         self.pos_embeddings = nn.Embedding(config.block_size, config.embedding_size)
         self.token_embeddings = nn.Embedding(config.vocab_size, config.embedding_size)
-        self.transformer_blocks = nn.Sequential(*[
-            Block(config) 
-            for _ in range(config.num_layers)
-        ])
+        self.transformer_blocks = nn.Sequential(
+            *[Block(config) for _ in range(config.num_layers)]
+        )
         self.layer_norm = nn.LayerNorm(config.embedding_size)
-        self.lm_head = nn.Linear(config.embedding_size, config.vocab_size)
+        self.lm_head = nn.Sequential(
+            nn.Linear(config.embedding_size, config.embedding_size * 2),
+            nn.ReLU(),
+            nn.Linear(config.embedding_size * 2, config.embedding_size * 2),
+            nn.ReLU(),
+            nn.Linear(config.embedding_size * 2, config.vocab_size),
+        )
 
-    def forward(self, x):
+    def forward(self, x, return_hidden_states=False):
         B, T = x.shape  # (batch_size, block_size)
 
         position_indexes = torch.arange(T, device=self.device)
         pos_embeddings = self.pos_embeddings(position_indexes)
-        token_embeddings = self.token_embeddings(x) # NOTE: (B, T, C)
+        token_embeddings = self.token_embeddings(x)  # NOTE: (B, T, C)
 
         x = pos_embeddings + token_embeddings
         x = self.transformer_blocks(x)
         x = self.layer_norm(x)
 
-        logits = self.lm_head(x)
-        return logits
+        if return_hidden_states:
+            return x
+        else:
+            logits = self.lm_head(x)
+            return logits
 
     def loss_function(self, logits, y):
         B, T, C = logits.shape
@@ -152,13 +170,14 @@ class Transformer(nn.Module):
                 yield idx_next
             idx = torch.cat((idx, idx_next), dim=1)  # (B, T+1)
         return idx
-    
+
     def save_checkpoint(self, path):
         torch.save(self.state_dict(), path)
-    
+
     @property
     def num_parameters(self):
         return sum(p.numel() for p in self.parameters())
+
 
 def train():
     config = Config()
@@ -176,9 +195,9 @@ def train():
         losses = []
         with tqdm(train, unit="batch", desc=f"Epoch - {epoch}") as train:
             for x, y in train:
-                x = x.to(config.device) 
+                x = x.to(config.device)
                 y = y.to(config.device)
-                
+
                 logits = model(x)
                 loss = model.loss_function(logits, y)
 
@@ -218,7 +237,6 @@ def train():
 
     model.save_checkpoint("model.pt")
 
+
 if __name__ == "__main__":
     train()
-
-
